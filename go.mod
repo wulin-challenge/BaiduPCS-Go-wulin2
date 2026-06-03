@@ -1,6 +1,6 @@
 module github.com/qjfoidnh/BaiduPCS-Go
 
-go 1.23
+go 1.25.0
 
 require (
 	github.com/GeertJohan/go.incremental v1.0.0
@@ -18,13 +18,10 @@ require (
 	github.com/tidwall/gjson v1.18.0
 	github.com/urfave/cli v1.22.5
 	golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550
-	golang.org/x/sys v0.25.0
+	golang.org/x/sys v0.45.0
 )
 
-require (
-	github.com/rs/dnscache v0.0.0-20230804202142-fc85eb664529
-	golang.org/x/net v0.0.0-20190620200207-3b0461eec859
-)
+require golang.org/x/net v0.0.0-20190620200207-3b0461eec859
 
 require (
 	github.com/GeertJohan/go.rice v1.0.2 // indirect
@@ -41,6 +38,5 @@ require (
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
-	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
