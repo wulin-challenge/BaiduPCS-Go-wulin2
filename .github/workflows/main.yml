@@ -1,6 +1,14 @@
 name: CI
 
-on: [push, pull_request]
+# push 和 pull_request 触发workflow
+# on: [push, pull_request]
+
+# tags 触发workflow 并且发布二进制文件
+on:
+  push:
+    tags:
+      - 'v*'
+
 
 env:
   BINARY_PREFIX: "baidupcs-go_"
@@ -69,9 +77,20 @@ jobs:
             exit 1
           fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ !github.head_ref }}
+#      - name: Upload artifact
+#        uses: actions/upload-artifact@v4
+#        if: ${{ !github.head_ref }}
+#        with:
+#          name: ${{ matrix.goos }}_${{ matrix.goarch }}
+#          path: output/
+
+      # 4. 发布到 GitHub Releases
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ matrix.goos }}_${{ matrix.goarch }}
-          path: output/
+          # 上传 dist 文件夹下的所有文件
+          files: dist/*
+          # 自动根据 Git Tag 生成 Release 标题
+          name: "${{ github.ref_name }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
