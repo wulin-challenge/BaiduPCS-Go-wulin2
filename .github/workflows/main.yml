@@ -31,6 +31,18 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Generate Windows resource files
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          GOVERSIONINFO="$(go env GOPATH)/bin/goversioninfo"
+
+          rm -f resource_windows_386.syso resource_windows_amd64.syso
+
+          GOARCH=386 "$GOVERSIONINFO" -o=resource_windows_386.syso
+          GOARCH=amd64 "$GOVERSIONINFO" -o=resource_windows_amd64.syso
       
       # 🚀 重点修改：删除了“Cache downloaded module”这一整块
       
