@@ -59,17 +59,19 @@ print_help() {
     printf '  ./baiduud.sh u [-lu 本地上传目录] [-bu 网盘上传目录] [-del]\n'
     printf '  ./baiduud.sh d [-ld 本地下载目录] [-bd 网盘下载目录]\n'
     printf '  ./baiduud.sh del [-bu 网盘上传目录]\n'
+    printf '  ./baiduud.sh list [-bu 网盘上传目录]\n'
     printf '\n'
     printf '操作：\n'
     printf '  help  显示本帮助信息，不执行上传、下载或删除。\n'
     printf '  u     追加上传本地目录中的内容，同名文件覆盖。\n'
     printf '  d     列出网盘目录，选择序号后下载。\n'
     printf '  del   清空网盘上传目录中的内容，但保留目录本身。\n'
+    printf '  list  只显示网盘上传目录列表，不执行下载或删除。\n'
     printf '\n'
     printf '目录参数：\n'
     printf '  -lu   指定本地上传目录，仅适用于 u。\n'
     printf '        默认值：%s\n' "$LOCAL_UPLOAD"
-    printf '  -bu   指定百度网盘上传目录，仅适用于 u。\n'
+    printf '  -bu   指定百度网盘上传目录，适用于 u、del 和 list。\n'
     printf '        默认值：%s\n' "$BAIDU_UPLOAD"
     printf '  -ld   指定本地下载目录，仅适用于 d。\n'
     printf '        默认值：%s\n' "$LOCAL_DOWNLOAD"
@@ -78,14 +80,15 @@ print_help() {
     printf '  -del  上传前清空网盘上传目录，仅适用于 u，不要求二次确认。\n'
     printf '\n'
     printf '规则：\n'
-    printf '  1. 操作 u、d、del 或 help 必须放在第一个参数。\n'
+    printf '  1. 操作 u、d、del、list 或 help 必须放在第一个参数。\n'
     printf '  2. 目录包含空格时必须使用引号包围。\n'
     printf '  3. 相对路径以执行命令时的当前目录为基准。\n'
     printf '  4. 同一目录参数重复出现时，最后一个值生效。\n'
-    printf '  5. u 只能使用 -lu/-bu/-del，d 只能使用 -ld/-bd。\n'
+    printf '  5. u 只能使用 -lu/-bu/-del，d 只能使用 -ld/-bd，list 只能使用 -bu。\n'
     printf '  6. del 只能使用 -bu，并要求输入 y 确认。\n'
     printf '  7. 普通上传不会删除网盘内容，只覆盖同名文件。\n'
     printf '  8. 下载选择支持 1、1,2 或 a；a 表示下载全部。\n'
+    printf '  9. del 和 u -del 拒绝根目录、相对路径、通配符及 . 或 .. 路径段。\n'
     printf '\n'
     printf '完整案例：\n'
     printf '  baiduud help\n'
@@ -93,9 +96,11 @@ print_help() {
     printf '  ./baiduud.sh u\n'
     printf '  ./baiduud.sh d\n'
     printf '  ./baiduud.sh del\n'
+    printf '  ./baiduud.sh list\n'
     printf '  ./baiduud.sh u -lu ./ -bu /resources/upload_temp\n'
     printf '  ./baiduud.sh u -lu /data/conf/mhloctest/upload -bu /resources/upload_temp\n'
     printf '  ./baiduud.sh del -bu /resources/upload_temp\n'
+    printf '  ./baiduud.sh list -bu /resources/upload_temp\n'
     printf '  ./baiduud.sh u -del\n'
     printf '  ./baiduud.sh u -lu ./ -bu /resources/upload_temp -del\n'
     printf '  ./baiduud.sh u -lu /data/conf/mhloctest/upload -bu /resources/upload_temp -del\n'
@@ -172,8 +177,14 @@ parse_arguments() {
                 return 1
             fi
             ;;
+        list | LIST | List)
+            if ((USED_LU == 1 || USED_LD == 1 || USED_BD == 1 || DELETE_BEFORE_UPLOAD == 1)); then
+                ARG_ERROR="列表操作 list 只能使用 -bu。"
+                return 1
+            fi
+            ;;
         *)
-            ARG_ERROR="未知操作：${ACTION}。请使用 u、d、del 或 help。"
+            ARG_ERROR="未知操作：${ACTION}。请使用 u、d、del、list 或 help。"
             return 1
             ;;
     esac
@@ -249,12 +260,38 @@ remote_item_count() {
     grep -Ec '^[[:space:]]+[0-9]+[[:space:]]' "$REMOTE_LIST_FILE" || true
 }
 
+# 删除只允许作用于明确的非根绝对路径，避免通配符拼接后误删网盘根目录。
+validate_delete_remote_path() {
+    local path="$1"
+
+    if [[ -z "$path" || "$path" != /* || "$path" == *'*'* || "$path" == *'?'* || "$path" == *'//'* ]]; then
+        log "错误" "拒绝清空网盘目录：必须使用非根绝对路径，且不能包含 *、?、//、. 或 .. 路径段。"
+        return 1
+    fi
+    if [[ "$path" =~ (^|/)(\.|\.\.)(/|$) ]]; then
+        log "错误" "拒绝清空网盘目录：必须使用非根绝对路径，且不能包含 *、?、//、. 或 .. 路径段。"
+        return 1
+    fi
+
+    while [[ "$path" != "/" && "$path" == */ ]]; do
+        path="${path%/}"
+    done
+    if [[ "$path" == "/" ]]; then
+        log "错误" "拒绝清空网盘目录：不能删除网盘根目录。"
+        return 1
+    fi
+
+    VALIDATED_DELETE_PATH="$path"
+}
+
 # 清空网盘目录内容但保留目录。第二个参数为 yes 时要求输入 y 确认。
 clear_remote_contents() {
     local remote_path="$1"
     local require_confirmation="$2"
     local confirmation=""
 
+    validate_delete_remote_path "$remote_path" || return 1
+    remote_path="$VALIDATED_DELETE_PATH"
     list_remote "$remote_path" || return 1
 
     if ! remote_has_items; then
@@ -414,6 +451,11 @@ prompt_download_selection() {
 
 download_selected_items() {
     local index
+    local download_output_file
+    local download_status
+    local local_path
+    local validation_error=""
+    local has_nonempty_file=0
     local -a remote_paths=()
 
     for index in "${SELECTED_INDEXES[@]}"; do
@@ -423,8 +465,55 @@ download_selected_items() {
 
     log "信息" "开始下载所选项目，已启用同名文件覆盖选项。"
     printf '\n'
-    if ! baiducmd download --ow --saveto "$LOCAL_DOWNLOAD" "${remote_paths[@]}"; then
+    if ! download_output_file="$(mktemp "${TMPDIR:-/tmp}/baiduud-download.XXXXXX")"; then
+        log "错误" "无法创建下载校验临时文件。"
+        return 1
+    fi
+
+    baiducmd download --ow --saveto "$LOCAL_DOWNLOAD" "${remote_paths[@]}" 2>&1 \
+        | tee -a "$LOG_FILE" "$download_output_file"
+    download_status="${PIPESTATUS[0]}"
+    if ((download_status != 0)); then
+        rm -f -- "$download_output_file"
         log "错误" "下载命令返回失败状态。"
+        return 1
+    fi
+
+    if ! grep -Fq -- '下载结束' "$download_output_file"; then
+        validation_error="客户端下载输出中缺少“下载结束”完成标记"
+    fi
+
+    for index in "${SELECTED_INDEXES[@]}"; do
+        [[ -z "$validation_error" ]] || break
+        local_path="${LOCAL_DOWNLOAD}/${REMOTE_NAMES[$index]}"
+        if [[ "${REMOTE_TYPES[$index]}" == "文件夹" ]]; then
+            if [[ ! -d "$local_path" ]]; then
+                validation_error="$local_path"
+                break
+            fi
+            continue
+        fi
+
+        if [[ ! -f "$local_path" ]]; then
+            validation_error="$local_path"
+            break
+        fi
+        if [[ "${REMOTE_SIZES[$index]}" != "0B" ]]; then
+            has_nonempty_file=1
+            if [[ ! -s "$local_path" ]]; then
+                validation_error="$local_path"
+                break
+            fi
+        fi
+    done
+
+    if ((has_nonempty_file == 1)) && grep -Fq -- '数据总量: 0B' "$download_output_file"; then
+        validation_error="${validation_error:-客户端下载数据量为 0B}"
+    fi
+
+    rm -f -- "$download_output_file"
+    if [[ -n "$validation_error" ]]; then
+        log "错误" "下载校验失败，本地未生成有效内容：${validation_error}"
         return 1
     fi
 
@@ -432,8 +521,11 @@ download_selected_items() {
 }
 
 verify_remote_target() {
-    local remote_path="$1"
+    local local_path="$1"
+    local remote_path="$2"
     local meta_file
+    local local_size
+    local remote_size
 
     if ! meta_file="$(mktemp "${TMPDIR:-/tmp}/baiduud-meta.XXXXXX")"; then
         log "错误" "无法创建上传校验临时文件。"
@@ -446,6 +538,17 @@ verify_remote_target() {
         rm -f -- "$meta_file"
         log "错误" "上传后无法验证网盘目标：${remote_path}"
         return 1
+    fi
+
+    if [[ -f "$local_path" ]]; then
+        local_size="$(stat -c '%s' -- "$local_path")"
+        remote_size="$(sed -nE 's/^[[:space:]]*文件大小[[:space:]]+([0-9]+),.*$/\1/p' "$meta_file" | sed -n '1p')"
+        if [[ -z "$remote_size" || "$local_size" != "$remote_size" ]]; then
+            tee -a "$LOG_FILE" <"$meta_file"
+            rm -f -- "$meta_file"
+            log "错误" "上传校验失败，本地与网盘文件字节数不一致：${remote_path}"
+            return 1
+        fi
     fi
 
     rm -f -- "$meta_file"
@@ -465,10 +568,17 @@ upload_main() {
     local item_name
     local local_count
     local remote_count
+    local upload_output_file
+    local upload_status
 
     log "信息" "进入上传流程。"
     log "信息" "本地上传目录：${LOCAL_UPLOAD}"
     log "信息" "网盘上传目录：${BAIDU_UPLOAD}"
+
+    if ((DELETE_BEFORE_UPLOAD == 1)); then
+        validate_delete_remote_path "$BAIDU_UPLOAD" || return 1
+        BAIDU_UPLOAD="$VALIDATED_DELETE_PATH"
+    fi
 
     ensure_local_dir "$LOCAL_UPLOAD" || return 1
     ensure_remote_dir "$BAIDU_UPLOAD" || return 1
@@ -499,11 +609,25 @@ upload_main() {
         item_name="$(basename -- "$item")"
         printf '\n'
         log "信息" "正在上传：${item_name}"
-        if ! baiducmd upload --policy overwrite "$item" "$BAIDU_UPLOAD"; then
+        if ! upload_output_file="$(mktemp "${TMPDIR:-/tmp}/baiduud-upload.XXXXXX")"; then
+            log "错误" "无法创建上传校验临时文件。"
+            return 1
+        fi
+        baiducmd upload --policy overwrite "$item" "$BAIDU_UPLOAD" 2>&1 \
+            | tee -a "$LOG_FILE" "$upload_output_file"
+        upload_status="${PIPESTATUS[0]}"
+        if ((upload_status != 0)); then
+            rm -f -- "$upload_output_file"
             log "错误" "上传命令返回失败状态：${item_name}"
             return 1
         fi
-        verify_remote_target "${BAIDU_UPLOAD}/${item_name}" || return 1
+        if ! grep -Fq -- '上传结束' "$upload_output_file"; then
+            rm -f -- "$upload_output_file"
+            log "错误" "上传校验失败，客户端输出中缺少“上传结束”完成标记：${item_name}"
+            return 1
+        fi
+        rm -f -- "$upload_output_file"
+        verify_remote_target "$item" "${BAIDU_UPLOAD}/${item_name}" || return 1
     done
 
     log "信息" "上传命令执行完毕，开始校验网盘目录。"
@@ -542,10 +666,29 @@ download_main() {
     download_selected_items
 }
 
+# 只读显示网盘上传目录，复用下载流程的项目解析和五列表格。
+list_main() {
+    log "信息" "进入网盘列表查询流程。"
+    log "信息" "网盘查询目录：${BAIDU_UPLOAD}"
+
+    ensure_remote_dir "$BAIDU_UPLOAD" || return 1
+    load_remote_items
+    if ((${#REMOTE_NAMES[@]} == 0)); then
+        log "警告" "网盘查询目录为空：${BAIDU_UPLOAD}"
+        return 0
+    fi
+
+    print_remote_table
+    log "信息" "网盘列表查询完成，共显示 ${#REMOTE_NAMES[@]} 个顶层项目。"
+}
+
 # 独立删除上传目录中的全部内容，但保留目录本身。
 delete_main() {
     log "信息" "进入独立删除流程。"
     log "警告" "准备清空网盘目录：${BAIDU_UPLOAD}"
+
+    validate_delete_remote_path "$BAIDU_UPLOAD" || return 1
+    BAIDU_UPLOAD="$VALIDATED_DELETE_PATH"
 
     ensure_remote_dir "$BAIDU_UPLOAD" || return 1
     clear_remote_contents "$BAIDU_UPLOAD" "yes"
@@ -560,7 +703,7 @@ main() {
     log "信息" "脚本启动，接收到的参数：$*"
 
     if (($# == 0)); then
-        ARG_ERROR="未指定操作，请使用 u、d、del 或 help。"
+        ARG_ERROR="未指定操作，请使用 u、d、del、list 或 help。"
         log "错误" "$ARG_ERROR"
         print_help
         return 1
@@ -600,6 +743,9 @@ main() {
             ;;
         del | DEL | Del)
             delete_main
+            ;;
+        list | LIST | List)
+            list_main
             ;;
     esac
 }

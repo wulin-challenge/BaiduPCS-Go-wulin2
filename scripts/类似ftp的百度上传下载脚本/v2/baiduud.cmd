@@ -31,10 +31,10 @@ call :log 信息 "脚本启动，接收到的参数：%*"
 
 rem ============================================================
 rem 参数检查
-rem 第一个参数必须是 u、d、del 或 help，后续参数按操作进行校验。
+rem 第一个参数必须是 u、d、del、list 或 help，后续参数按操作进行校验。
 rem ============================================================
 if "%~1"=="" (
-    set "ARG_ERROR=未指定操作，请使用 u、d、del 或 help。"
+    set "ARG_ERROR=未指定操作，请使用 u、d、del、list 或 help。"
     goto :argument_error
 )
 
@@ -52,8 +52,8 @@ if /i "%~1"=="-h" goto :help_alias
 if /i "%~1"=="--help" goto :help_alias
 
 set "ACTION=%~1"
-if /i not "%ACTION%"=="u" if /i not "%ACTION%"=="d" if /i not "%ACTION%"=="del" (
-    set "ARG_ERROR=未知操作：%ACTION%。请使用 u、d、del 或 help。"
+if /i not "%ACTION%"=="u" if /i not "%ACTION%"=="d" if /i not "%ACTION%"=="del" if /i not "%ACTION%"=="list" (
+    set "ARG_ERROR=未知操作：%ACTION%。请使用 u、d、del、list 或 help。"
     goto :argument_error
 )
 
@@ -151,6 +151,7 @@ goto :parse_arguments
 :arguments_parsed
 if /i "%ACTION%"=="u" goto :validate_upload_arguments
 if /i "%ACTION%"=="d" goto :validate_download_arguments
+if /i "%ACTION%"=="list" goto :validate_list_arguments
 goto :validate_delete_arguments
 
 :validate_upload_arguments
@@ -163,6 +164,17 @@ if defined USED_BD (
     goto :argument_error
 )
 goto :check_baiducmd
+
+:validate_list_arguments
+if defined USED_LU goto :list_argument_error
+if defined USED_LD goto :list_argument_error
+if defined USED_BD goto :list_argument_error
+if defined DELETE_BEFORE_UPLOAD goto :list_argument_error
+goto :check_baiducmd
+
+:list_argument_error
+set "ARG_ERROR=列表操作 list 只能使用 -bu。"
+goto :argument_error
 
 :validate_download_arguments
 if defined USED_LU (
@@ -206,6 +218,7 @@ if errorlevel 1 (
 
 if /i "%ACTION%"=="u" goto :upload
 if /i "%ACTION%"=="d" goto :download
+if /i "%ACTION%"=="list" goto :list
 goto :delete
 
 rem ============================================================
@@ -219,6 +232,10 @@ rem ============================================================
 call :log 信息 "进入上传流程。"
 call :log 信息 "本地上传目录：%LOCAL_UPLOAD%"
 call :log 信息 "网盘上传目录：%BAIDU_UPLOAD%"
+
+rem 只有 -del 会执行远端删除，因此在任何 baiducmd 调用前先校验删除路径。
+if defined DELETE_BEFORE_UPLOAD call :prepare_upload_delete_path
+if errorlevel 1 goto :failed
 
 call :ensure_local_dir "%LOCAL_UPLOAD%"
 if errorlevel 1 (
@@ -248,6 +265,13 @@ if "%LOCAL_COUNT%"=="0" (
     goto :succeeded
 )
 
+rem CMD 的 call 会对百分号执行二次变量展开，必须在进入上传循环前明确拒绝。
+dir /b /a "%LOCAL_UPLOAD%" 2>nul | findstr /L /C:"%%" >nul 2>&1
+if not errorlevel 1 (
+    call :log 错误 "Windows CMD 版本不支持名称中包含百分号（%%）的文件或文件夹，请先重命名。"
+    goto :failed
+)
+
 call :log 信息 "网盘上传目录已就绪，已有内容将被保留。"
 call :log 信息 "待上传的顶层项目数量：%LOCAL_COUNT%"
 
@@ -259,7 +283,7 @@ if errorlevel 1 (
 
 rem 逐项上传可以避免在网盘目录中额外生成一层 upload 文件夹。
 set "UPLOAD_FAILED="
-for /f "delims=" %%I in ('dir /b /a') do (
+for /f "eol=: delims=" %%I in ('dir /b /a') do (
     if not defined UPLOAD_FAILED call :upload_one_item "%%I"
 )
 popd
@@ -281,33 +305,58 @@ for /f %%C in ('findstr /R /C:"^[ ][ ]*[0-9][0-9]*[ ]" "%REMOTE_LIST_FILE%" ^| f
 call :log 信息 "上传完成，已验证 %LOCAL_COUNT% 个本地顶层项目；网盘目录当前共有 %REMOTE_COUNT% 个顶层项目。"
 goto :succeeded
 
-rem 上传单个项目，并通过 meta 输出中的分隔线确认远端目标存在。
+rem 上传单个项目：直接连接控制台实时显示状态；普通文件还要比较本地与远端精确字节数。
 :upload_one_item
 echo.
 call :log 信息 "正在上传：%~1"
+set "REMOTE_META_FILE="
+rem 必须直接连接控制台，baiducmd 才能持续刷新上传进度并按控制台编码输出中文。
+call :log 信息 "以下为 baiducmd 实时上传状态。"
 baiducmd upload --policy overwrite "%~1" "%BAIDU_UPLOAD%"
-if errorlevel 1 (
-    set "UPLOAD_FAILED=1"
-    call :log 错误 "上传命令返回失败状态：%~1"
-    exit /b 1
-)
+set "UPLOAD_COMMAND_ERROR=%ERRORLEVEL%"
+if not "%UPLOAD_COMMAND_ERROR%"=="0" goto :upload_command_failed
 
 set "REMOTE_META_FILE=%TEMP%\baiduud_meta_%RANDOM%_%RANDOM%.tmp"
 baiducmd meta "%BAIDU_UPLOAD%/%~1" >"%REMOTE_META_FILE%" 2>&1
 findstr /C:"----" "%REMOTE_META_FILE%" >nul 2>&1
-if errorlevel 1 (
-    type "%REMOTE_META_FILE%"
-    type "%REMOTE_META_FILE%" >>"%LOG_FILE%"
-    del /q "%REMOTE_META_FILE%" >nul 2>&1
-    set "REMOTE_META_FILE="
-    set "UPLOAD_FAILED=1"
-    call :log 错误 "上传后无法验证网盘目标：%BAIDU_UPLOAD%/%~1"
-    exit /b 1
-)
+if errorlevel 1 goto :upload_meta_failed
+
+if exist "%~1\" goto :upload_item_verified
+
+set "LOCAL_FILE_SIZE="
+set "REMOTE_FILE_SIZE="
+for %%F in ("%~1") do set "LOCAL_FILE_SIZE=%%~zF"
+for /f "tokens=2 delims=, " %%S in ('findstr /R /C:"[0-9][0-9]*," "%REMOTE_META_FILE%"') do set "REMOTE_FILE_SIZE=%%S"
+if not defined LOCAL_FILE_SIZE goto :upload_size_failed
+if not defined REMOTE_FILE_SIZE goto :upload_size_failed
+if not "%LOCAL_FILE_SIZE%"=="%REMOTE_FILE_SIZE%" goto :upload_size_failed
+
+:upload_item_verified
 del /q "%REMOTE_META_FILE%" >nul 2>&1
 set "REMOTE_META_FILE="
 call :log 信息 "上传目标验证成功：%BAIDU_UPLOAD%/%~1"
 exit /b 0
+
+:upload_command_failed
+call :log 错误 "上传命令返回失败状态：%~1"
+goto :upload_item_failed
+
+:upload_meta_failed
+type "%REMOTE_META_FILE%"
+type "%REMOTE_META_FILE%" >>"%LOG_FILE%"
+call :log 错误 "上传校验失败，无法读取网盘目标：%BAIDU_UPLOAD%/%~1"
+goto :upload_item_failed
+
+:upload_size_failed
+type "%REMOTE_META_FILE%"
+type "%REMOTE_META_FILE%" >>"%LOG_FILE%"
+call :log 错误 "上传校验失败，本地与网盘文件字节数不一致：%~1"
+
+:upload_item_failed
+if defined REMOTE_META_FILE del /q "%REMOTE_META_FILE%" >nul 2>&1
+set "REMOTE_META_FILE="
+set "UPLOAD_FAILED=1"
+exit /b 1
 
 rem ============================================================
 rem 下载流程
@@ -334,6 +383,7 @@ if errorlevel 1 (
 )
 
 call :load_remote_items
+if errorlevel 1 goto :failed
 if "%REMOTE_ITEM_COUNT%"=="0" (
     call :log 警告 "网盘下载目录为空，没有需要下载的内容。"
     goto :succeeded
@@ -353,12 +403,41 @@ call :log 信息 "已完成所选项目的下载。"
 goto :succeeded
 
 rem ============================================================
+rem 只读列表流程
+rem 使用网盘上传目录，并复用下载流程的解析与五列表格输出。
+rem ============================================================
+:list
+call :log 信息 "进入网盘列表查询流程。"
+call :log 信息 "网盘查询目录：%BAIDU_UPLOAD%"
+
+call :ensure_remote_dir "%BAIDU_UPLOAD%"
+if errorlevel 1 (
+    call :log 错误 "无法创建或读取网盘查询目录：%BAIDU_UPLOAD%"
+    goto :failed
+)
+
+call :load_remote_items
+if errorlevel 1 goto :failed
+if "%REMOTE_ITEM_COUNT%"=="0" (
+    call :log 警告 "网盘查询目录为空：%BAIDU_UPLOAD%"
+    goto :succeeded
+)
+
+call :print_remote_table
+call :log 信息 "网盘列表查询完成，共显示 %REMOTE_ITEM_COUNT% 个顶层项目。"
+goto :succeeded
+
+rem ============================================================
 rem 独立删除流程
 rem 删除上传目录中的全部内容，但保留目录本身。
 rem ============================================================
 :delete
 call :log 信息 "进入独立删除流程。"
 call :log 警告 "准备清空网盘目录：%BAIDU_UPLOAD%"
+
+call :validate_delete_remote_path "%BAIDU_UPLOAD%"
+if errorlevel 1 goto :failed
+set "BAIDU_UPLOAD=%VALIDATED_DELETE_PATH%"
 
 call :ensure_remote_dir "%BAIDU_UPLOAD%"
 if errorlevel 1 (
@@ -402,6 +481,34 @@ if errorlevel 1 (
 call :log 信息 "网盘目录可以正常访问：%~1"
 exit /b 0
 
+rem 删除路径必须是非根绝对路径，且不能包含通配符、重复斜杠或跳级路径段。
+:validate_delete_remote_path
+set "VALIDATED_DELETE_PATH=%~1"
+if not defined VALIDATED_DELETE_PATH goto :invalid_delete_remote_path
+if not "%VALIDATED_DELETE_PATH:~0,1%"=="/" goto :invalid_delete_remote_path
+set VALIDATED_DELETE_PATH | findstr /L /C:"*" /C:"?" /C:"//" >nul 2>&1
+if not errorlevel 1 goto :invalid_delete_remote_path
+if not "%VALIDATED_DELETE_PATH:/./=%"=="%VALIDATED_DELETE_PATH%" goto :invalid_delete_remote_path
+if not "%VALIDATED_DELETE_PATH:/../=%"=="%VALIDATED_DELETE_PATH%" goto :invalid_delete_remote_path
+if "%VALIDATED_DELETE_PATH:~-2%"=="/." goto :invalid_delete_remote_path
+if "%VALIDATED_DELETE_PATH:~-3%"=="/.." goto :invalid_delete_remote_path
+
+:trim_delete_remote_path
+if "%VALIDATED_DELETE_PATH%"=="/" goto :invalid_delete_remote_path
+if not "%VALIDATED_DELETE_PATH:~-1%"=="/" exit /b 0
+set "VALIDATED_DELETE_PATH=%VALIDATED_DELETE_PATH:~0,-1%"
+goto :trim_delete_remote_path
+
+:invalid_delete_remote_path
+call :log 错误 "拒绝清空网盘目录：必须使用非根绝对路径，且不能包含 *、?、//、. 或 .. 路径段。"
+exit /b 1
+
+:prepare_upload_delete_path
+call :validate_delete_remote_path "%BAIDU_UPLOAD%"
+if errorlevel 1 exit /b 1
+set "BAIDU_UPLOAD=%VALIDATED_DELETE_PATH%"
+exit /b 0
+
 rem 将网盘目录列表写入临时文件，供空目录判断和数量校验使用。
 :list_remote
 if defined REMOTE_LIST_FILE del /q "%REMOTE_LIST_FILE%" >nul 2>&1
@@ -420,7 +527,9 @@ exit /b 0
 
 rem 清空网盘目录内容但保留目录。第二个参数为 yes 时要求输入 y 确认。
 :clear_remote_contents
-set "CLEAR_REMOTE_PATH=%~1"
+call :validate_delete_remote_path "%~1"
+if errorlevel 1 exit /b 1
+set "CLEAR_REMOTE_PATH=%VALIDATED_DELETE_PATH%"
 set "CLEAR_REQUIRE_CONFIRM=%~2"
 
 call :list_remote "%CLEAR_REMOTE_PATH%"
@@ -467,6 +576,11 @@ exit /b 0
 rem 解析 ls -l 项目行，建立从 1 开始的下载项目数组。
 :load_remote_items
 set "REMOTE_ITEM_COUNT=0"
+findstr /L /C:"%%" "%REMOTE_LIST_FILE%" >nul 2>&1
+if not errorlevel 1 (
+    call :log 错误 "Windows CMD 版本不支持下载名称中包含百分号（%%）的网盘项目，请先在网盘中重命名。"
+    exit /b 1
+)
 for /f "tokens=1-8,*" %%A in ('findstr /R /C:"^[ ][ ]*[0-9][0-9]*[ ]" "%REMOTE_LIST_FILE%"') do call :store_remote_item "%%D" "%%G %%H" "%%I"
 exit /b 0
 
@@ -477,11 +591,13 @@ set "ITEM_TAIL=%~3"
 if "%ITEM_SIZE%"=="-" goto :store_remote_directory
 
 for /f "tokens=1,*" %%A in ("%ITEM_TAIL%") do set "ITEM_NAME=%%B"
+call :trim_item_name
 set "ITEM_TYPE=文件"
 goto :store_remote_values
 
 :store_remote_directory
 set "ITEM_NAME=%ITEM_TAIL%"
+call :trim_item_name
 if "%ITEM_NAME:~-1%"=="/" set "ITEM_NAME=%ITEM_NAME:~0,-1%"
 set "ITEM_TYPE=文件夹"
 
@@ -493,6 +609,13 @@ set "REMOTE_TYPE_%REMOTE_ITEM_COUNT%=%ITEM_TYPE%"
 set "REMOTE_SIZE_%REMOTE_ITEM_COUNT%=%ITEM_SIZE%"
 set "REMOTE_MODIFIED_%REMOTE_ITEM_COUNT%=%ITEM_MODIFIED%"
 exit /b 0
+
+rem baiducmd ls -l 会在名称右侧补空格用于列对齐，拼接远端路径前必须移除。
+:trim_item_name
+if not defined ITEM_NAME exit /b 0
+if not "%ITEM_NAME:~-1%"==" " exit /b 0
+set "ITEM_NAME=%ITEM_NAME:~0,-1%"
+goto :trim_item_name
 
 :print_remote_table
 echo.
@@ -571,15 +694,87 @@ exit /b 0
 :download_selected_item
 if not defined SELECTED_%~1 exit /b 0
 call set "ITEM_NAME=%%REMOTE_NAME_%~1%%"
+call set "ITEM_TYPE=%%REMOTE_TYPE_%~1%%"
+call set "ITEM_SIZE=%%REMOTE_SIZE_%~1%%"
 echo.
 call :log 信息 "正在下载：%ITEM_NAME%"
-baiducmd download --ow --saveto "%LOCAL_DOWNLOAD%" "%BAIDU_DOWNLOAD%/%ITEM_NAME%"
-if errorlevel 1 (
-    set "DOWNLOAD_FAILED=1"
-    call :log 错误 "下载命令返回失败状态：%ITEM_NAME%"
-    exit /b 1
-)
-call :log 信息 "下载命令执行完成：%ITEM_NAME%"
+set "DOWNLOAD_STAGE_DIR=%LOCAL_DOWNLOAD%\.baiduud_download_%RANDOM%_%RANDOM%"
+mkdir "%DOWNLOAD_STAGE_DIR%" >nul 2>&1
+if not exist "%DOWNLOAD_STAGE_DIR%\" goto :download_stage_failed
+
+rem 必须直接连接控制台，baiducmd 才能实时显示进度并按控制台编码输出中文。
+rem 下载先写入本次新建的暂存目录，避免正式目录中的旧文件掩盖下载失败。
+call :log 信息 "以下为 baiducmd 实时下载状态。"
+baiducmd download --ow --saveto "%DOWNLOAD_STAGE_DIR%" "%BAIDU_DOWNLOAD%/%ITEM_NAME%"
+set "DOWNLOAD_COMMAND_ERROR=%ERRORLEVEL%"
+if not "%DOWNLOAD_COMMAND_ERROR%"=="0" goto :download_command_failed
+
+if /i "%ITEM_TYPE%"=="文件夹" goto :verify_staged_directory
+
+if not exist "%DOWNLOAD_STAGE_DIR%\%ITEM_NAME%" goto :download_verification_failed
+set "DOWNLOADED_FILE_SIZE=0"
+for %%F in ("%DOWNLOAD_STAGE_DIR%\%ITEM_NAME%") do set "DOWNLOADED_FILE_SIZE=%%~zF"
+call :get_remote_exact_file_size "%BAIDU_DOWNLOAD%/%ITEM_NAME%"
+if errorlevel 1 goto :download_verification_failed
+if not "%DOWNLOADED_FILE_SIZE%"=="%REMOTE_EXACT_FILE_SIZE%" goto :download_verification_failed
+
+move /Y "%DOWNLOAD_STAGE_DIR%\%ITEM_NAME%" "%LOCAL_DOWNLOAD%\%ITEM_NAME%" >nul 2>&1
+if errorlevel 1 goto :download_transfer_failed
+goto :download_item_verified
+
+:verify_staged_directory
+if not exist "%DOWNLOAD_STAGE_DIR%\%ITEM_NAME%\" goto :download_verification_failed
+if not exist "%LOCAL_DOWNLOAD%\%ITEM_NAME%\" mkdir "%LOCAL_DOWNLOAD%\%ITEM_NAME%" >nul 2>&1
+if not exist "%LOCAL_DOWNLOAD%\%ITEM_NAME%\" goto :download_transfer_failed
+robocopy "%DOWNLOAD_STAGE_DIR%\%ITEM_NAME%" "%LOCAL_DOWNLOAD%\%ITEM_NAME%" /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul 2>&1
+if errorlevel 8 goto :download_transfer_failed
+goto :download_item_verified
+
+:download_command_failed
+call :cleanup_download_stage
+set "DOWNLOAD_FAILED=1"
+call :log 错误 "下载命令返回失败状态：%ITEM_NAME%"
+exit /b 1
+
+:download_stage_failed
+set "FAILED_DOWNLOAD_STAGE_DIR=%DOWNLOAD_STAGE_DIR%"
+call :cleanup_download_stage
+set "DOWNLOAD_FAILED=1"
+call :log 错误 "无法创建下载暂存目录：%FAILED_DOWNLOAD_STAGE_DIR%"
+set "FAILED_DOWNLOAD_STAGE_DIR="
+exit /b 1
+
+:download_verification_failed
+call :cleanup_download_stage
+set "DOWNLOAD_FAILED=1"
+call :log 错误 "下载校验失败，本地未生成有效内容：%LOCAL_DOWNLOAD%\%ITEM_NAME%"
+exit /b 1
+
+:download_transfer_failed
+call :cleanup_download_stage
+set "DOWNLOAD_FAILED=1"
+call :log 错误 "下载内容写入正式目录失败：%LOCAL_DOWNLOAD%\%ITEM_NAME%"
+exit /b 1
+
+:download_item_verified
+call :cleanup_download_stage
+call :log 信息 "下载完成并已写入正式目录：%LOCAL_DOWNLOAD%\%ITEM_NAME%"
+exit /b 0
+
+rem meta 重定向文件可能是 UTF-8；只匹配 ASCII 数字和逗号，避免再次发生中文乱码。
+:get_remote_exact_file_size
+set "REMOTE_EXACT_FILE_SIZE="
+set "DOWNLOAD_META_FILE=%TEMP%\baiduud_download_meta_%RANDOM%_%RANDOM%.tmp"
+baiducmd meta "%~1" >"%DOWNLOAD_META_FILE%" 2>&1
+for /f "tokens=2 delims=, " %%S in ('findstr /R /C:"[0-9][0-9]*," "%DOWNLOAD_META_FILE%"') do set "REMOTE_EXACT_FILE_SIZE=%%S"
+del /q "%DOWNLOAD_META_FILE%" >nul 2>&1
+set "DOWNLOAD_META_FILE="
+if not defined REMOTE_EXACT_FILE_SIZE exit /b 1
+exit /b 0
+
+:cleanup_download_stage
+if defined DOWNLOAD_STAGE_DIR if exist "%DOWNLOAD_STAGE_DIR%\" rmdir /s /q "%DOWNLOAD_STAGE_DIR%" >nul 2>&1
+set "DOWNLOAD_STAGE_DIR="
 exit /b 0
 
 rem 输出日志到控制台，并追加写入 baiduud.log。
@@ -601,17 +796,19 @@ echo   baiduud help
 echo   baiduud u [-lu 本地上传目录] [-bu 网盘上传目录] [-del]
 echo   baiduud d [-ld 本地下载目录] [-bd 网盘下载目录]
 echo   baiduud del [-bu 网盘上传目录]
+echo   baiduud list [-bu 网盘上传目录]
 echo.
 echo 操作：
 echo   help  显示本帮助信息，不执行上传、下载或删除。
 echo   u     追加上传本地目录中的内容，同名文件覆盖。
 echo   d     列出网盘目录，选择序号后下载。
 echo   del   清空网盘上传目录中的内容，但保留目录本身。
+echo   list  只显示网盘上传目录列表，不执行下载或删除。
 echo.
 echo 目录参数：
 echo   -lu   指定本地上传目录，仅适用于 u。
 echo         默认值：%LOCAL_UPLOAD%
-echo   -bu   指定百度网盘上传目录，仅适用于 u。
+echo   -bu   指定百度网盘上传目录，适用于 u、del 和 list。
 echo         默认值：%BAIDU_UPLOAD%
 echo   -ld   指定本地下载目录，仅适用于 d。
 echo         默认值：%LOCAL_DOWNLOAD%
@@ -620,23 +817,27 @@ echo         默认值：%BAIDU_DOWNLOAD%
 echo   -del  上传前清空网盘上传目录，仅适用于 u，不要求二次确认。
 echo.
 echo 规则：
-echo   1. 操作 u、d、del 或 help 必须放在第一个参数。
+echo   1. 操作 u、d、del、list 或 help 必须放在第一个参数。
 echo   2. 目录包含空格时必须使用双引号包围。
 echo   3. 相对路径以执行命令时的当前目录为基准。
 echo   4. 同一目录参数重复出现时，最后一个值生效。
-echo   5. u 只能使用 -lu/-bu/-del，d 只能使用 -ld/-bd。
+echo   5. u 只能使用 -lu/-bu/-del，d 只能使用 -ld/-bd，list 只能使用 -bu。
 echo   6. del 只能使用 -bu，并要求输入 y 确认。
 echo   7. 普通上传不会删除网盘内容，只覆盖同名文件。
 echo   8. 下载选择支持 1、1,2 或 a；a 表示下载全部。
+echo   9. del 和 u -del 拒绝根目录、相对路径、通配符及 . 或 .. 路径段。
+echo  10. Windows CMD 版本不支持名称中包含百分号（%%）的项目。
 echo.
 echo 完整案例：
 echo   baiduud help
 echo   baiduud u
 echo   baiduud d
 echo   baiduud del
+echo   baiduud list
 echo   baiduud u -lu ./ -bu /resources/upload_temp
 echo   baiduud u -lu D:\conf\mhloctest\upload -bu /resources/upload_temp
 echo   baiduud del -bu /resources/upload_temp
+echo   baiduud list -bu /resources/upload_temp
 echo   baiduud u -del
 echo   baiduud u -lu ./ -bu /resources/upload_temp -del
 echo   baiduud u -lu D:\conf\mhloctest\upload -bu /resources/upload_temp -del
