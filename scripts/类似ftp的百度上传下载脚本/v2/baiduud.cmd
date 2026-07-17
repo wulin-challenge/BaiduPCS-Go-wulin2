@@ -390,6 +390,7 @@ if "%REMOTE_ITEM_COUNT%"=="0" (
 )
 
 call :print_remote_table
+if errorlevel 1 goto :failed
 call :prompt_download_selection
 if errorlevel 1 (
     call :log 错误 "无法获得有效的下载选择。"
@@ -424,6 +425,7 @@ if "%REMOTE_ITEM_COUNT%"=="0" (
 )
 
 call :print_remote_table
+if errorlevel 1 goto :failed
 call :log 信息 "网盘列表查询完成，共显示 %REMOTE_ITEM_COUNT% 个顶层项目。"
 goto :succeeded
 
@@ -509,11 +511,21 @@ if errorlevel 1 exit /b 1
 set "BAIDU_UPLOAD=%VALIDATED_DELETE_PATH%"
 exit /b 0
 
-rem 将网盘目录列表写入临时文件，供空目录判断和数量校验使用。
+rem baiducmd 重定向的目录列表是 UTF-8；先转换为 GBK，再交给 CMD 解析中文名称。
 :list_remote
 if defined REMOTE_LIST_FILE del /q "%REMOTE_LIST_FILE%" >nul 2>&1
 set "REMOTE_LIST_FILE=%TEMP%\baiduud_%RANDOM%_%RANDOM%.tmp"
 baiducmd ls -l "%~1" >"%REMOTE_LIST_FILE%" 2>&1
+set "BAIDUUD_UTF8_LIST_FILE=%REMOTE_LIST_FILE%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$p=$env:BAIDUUD_UTF8_LIST_FILE;$u=[Text.UTF8Encoding]::new($false,$true);$t=[IO.File]::ReadAllText($p,$u);[IO.File]::WriteAllText($p,$t,[Text.Encoding]::GetEncoding(936))" >nul 2>&1
+set "LIST_ENCODING_ERROR=%ERRORLEVEL%"
+set "BAIDUUD_UTF8_LIST_FILE="
+if not "%LIST_ENCODING_ERROR%"=="0" (
+    set "LIST_ENCODING_ERROR="
+    call :log 错误 "无法解析网盘目录列表：客户端输出不是有效的 UTF-8。"
+    exit /b 1
+)
+set "LIST_ENCODING_ERROR="
 
 rem 成功的 ls 输出包含由连字符组成的分隔线；错误输出没有该分隔线。
 findstr /C:"----" "%REMOTE_LIST_FILE%" >nul 2>&1
@@ -619,19 +631,19 @@ goto :trim_item_name
 
 :print_remote_table
 echo.
-echo ^| 序号 ^| 名称 ^| 类型 ^| 大小 ^| 修改日期 ^|
-echo ^| ------------ ^| ------------ ^| ------------ ^| ------------ ^| ------------ ^|
-for /l %%N in (1,1,%REMOTE_ITEM_COUNT%) do call :print_remote_row %%N
+if not exist "%~dp0baiduud-table.ps1" goto :table_helper_missing
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0baiduud-table.ps1"
+if errorlevel 1 goto :table_render_failed
 echo.
 exit /b 0
 
-:print_remote_row
-call set "DISPLAY_NAME=%%REMOTE_NAME_%~1%%"
-call set "DISPLAY_TYPE=%%REMOTE_TYPE_%~1%%"
-call set "DISPLAY_SIZE=%%REMOTE_SIZE_%~1%%"
-call set "DISPLAY_MODIFIED=%%REMOTE_MODIFIED_%~1%%"
-echo ^| %~1 ^| %DISPLAY_NAME% ^| %DISPLAY_TYPE% ^| %DISPLAY_SIZE% ^| %DISPLAY_MODIFIED% ^|
-exit /b 0
+:table_helper_missing
+call :log 错误 "缺少终端表格辅助脚本：%~dp0baiduud-table.ps1"
+exit /b 1
+
+:table_render_failed
+call :log 错误 "无法生成网盘项目终端表格，请检查 baiduud-table.ps1。"
+exit /b 1
 
 :prompt_download_selection
 for /l %%N in (1,1,%REMOTE_ITEM_COUNT%) do set "SELECTED_%%N="

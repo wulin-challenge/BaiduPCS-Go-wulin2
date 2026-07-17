@@ -374,20 +374,84 @@ load_remote_items() {
 
 print_remote_table() {
     local index
-    local display_name
+    local value_width
+    local index_width
+    local name_width
+    local type_width
+    local size_width
+    local modified_width
+
+    text_width() {
+        LC_ALL=C.UTF-8 wc -L
+    }
+
+    print_border() {
+        local width
+
+        printf '+'
+        for width in "$@"; do
+            printf '%*s' "$((width + 2))" '' | tr ' ' '-'
+            printf '+'
+        done
+        printf '\n'
+    }
+
+    print_cell() {
+        local value="$1"
+        local width="$2"
+        local current_width
+
+        current_width="$(printf '%s' "$value" | text_width)"
+        printf ' %s%*s ' "$value" "$((width - current_width))" ''
+    }
+
+    index_width="$(printf '%s' '序号' | text_width)"
+    name_width="$(printf '%s' '名称' | text_width)"
+    type_width="$(printf '%s' '类型' | text_width)"
+    size_width="$(printf '%s' '大小' | text_width)"
+    modified_width="$(printf '%s' '修改日期' | text_width)"
+
+    for index in "${!REMOTE_NAMES[@]}"; do
+        value_width="$(printf '%s' "$((index + 1))" | text_width)"
+        ((value_width > index_width)) && index_width="$value_width"
+        value_width="$(printf '%s' "${REMOTE_NAMES[$index]}" | text_width)"
+        ((value_width > name_width)) && name_width="$value_width"
+        value_width="$(printf '%s' "${REMOTE_TYPES[$index]}" | text_width)"
+        ((value_width > type_width)) && type_width="$value_width"
+        value_width="$(printf '%s' "${REMOTE_SIZES[$index]}" | text_width)"
+        ((value_width > size_width)) && size_width="$value_width"
+        value_width="$(printf '%s' "${REMOTE_MODIFIED[$index]}" | text_width)"
+        ((value_width > modified_width)) && modified_width="$value_width"
+    done
 
     printf '\n'
-    printf '| 序号 | 名称 | 类型 | 大小 | 修改日期 |\n'
-    printf '| ------------ | ------------ | ------------ | ------------ | ------------ |\n'
+    print_border "$index_width" "$name_width" "$type_width" "$size_width" "$modified_width"
+    printf '|'
+    print_cell '序号' "$index_width"
+    printf '|'
+    print_cell '名称' "$name_width"
+    printf '|'
+    print_cell '类型' "$type_width"
+    printf '|'
+    print_cell '大小' "$size_width"
+    printf '|'
+    print_cell '修改日期' "$modified_width"
+    printf '|\n'
+    print_border "$index_width" "$name_width" "$type_width" "$size_width" "$modified_width"
     for index in "${!REMOTE_NAMES[@]}"; do
-        display_name="${REMOTE_NAMES[$index]//|/\\|}"
-        printf '| %d | %s | %s | %s | %s |\n' \
-            "$((index + 1))" \
-            "$display_name" \
-            "${REMOTE_TYPES[$index]}" \
-            "${REMOTE_SIZES[$index]}" \
-            "${REMOTE_MODIFIED[$index]}"
+        printf '|'
+        print_cell "$((index + 1))" "$index_width"
+        printf '|'
+        print_cell "${REMOTE_NAMES[$index]}" "$name_width"
+        printf '|'
+        print_cell "${REMOTE_TYPES[$index]}" "$type_width"
+        printf '|'
+        print_cell "${REMOTE_SIZES[$index]}" "$size_width"
+        printf '|'
+        print_cell "${REMOTE_MODIFIED[$index]}" "$modified_width"
+        printf '|\n'
     done
+    print_border "$index_width" "$name_width" "$type_width" "$size_width" "$modified_width"
     printf '\n'
 }
 
